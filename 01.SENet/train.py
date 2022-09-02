@@ -140,7 +140,7 @@ for epoch in tqdm(range(1, EPOCHS + 1), desc='EPOCH', position=1, leave=False):
     writer.add_scalar('Train/Loss', mean_loss, epoch)  
     _print('train_loss=%.4f' % mean_loss)
     if epoch % MODEL_SAVE_STEP == 0:
-        torch.save(model.cpu(), osp.join(MODEL_LOGDIR, '%03d.pkl' % epoch))
+        torch.save(model.state_dict(), osp.join(MODEL_LOGDIR, '%03d.pkl' % epoch))
 
     model.eval()
     with torch.no_grad():
