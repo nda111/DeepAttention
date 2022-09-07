@@ -22,15 +22,15 @@ parser.add_argument('--tensorboard-logdir', '-tl', type=str, default='runs/')
 parser.add_argument('--logdir', '-l', type=str, default='log/')
 parser.add_argument('--log_id', '-li', type=str, default=None, help='default: yyyyMMdd-HHmmss')
 parser.add_argument('--log_id_postfix', '-lip', type=str, default=None)
-parser.add_argument('--model-save-step', '-s', type=int, default=5)
+parser.add_argument('--model-save-step', '-s', type=int, default=10)
 parser.add_argument('--dataroot', '-d', type=str, default='datasets/')
 parser.add_argument('--dataset', '-D', type=str, default='cifar10', help='cifar10 or cifar100 or ilsvrc2012')
 parser.add_argument('--batch-size', '-b', type=int, default=128)
 parser.add_argument('--model', '-m', type=str, default='resnet50', help='(se_)vgg[n](_bn) or (se_)resnet[n] or (se_)resnext[m_n]d')
 parser.add_argument('--optimizer', '-o', type=str, default='sgd', help='sgd or adam')
 parser.add_argument('--momentum', '-M', type=float, default=0.9, help='Only for SGD, momentum in [0, 1]')
-parser.add_argument('--learning-rate', '-lr', type=float, default=7.5E-2)
-parser.add_argument('--epochs', '-e', type=int, default=100)
+parser.add_argument('--learning-rate', '-lr', type=float, default=0.1)
+parser.add_argument('--epochs', '-e', type=int, default=900)
 
 args = parser.parse_args()
 GPU = args.gpu
@@ -54,10 +54,13 @@ EPOCHS = args.epochs
 #endregion
 
 #region DEVICE SELECTION
+torch.manual_seed(999)
 if GPU < 0:
     DEVICE = 'cpu'
 elif GPU <= torch.cuda.device_count():
     DEVICE = f'cuda:{GPU}'
+    torch.cuda.set_device(DEVICE)
+    torch.cuda.manual_seed(999)
 else:
     raise ValueError('Cannot find the selected CUDA device.')
 #endregion
@@ -103,8 +106,8 @@ elif DATASET == 'ilsvrc2012':
 else:
     raise ValueError('Dataset not supported.')
 
-train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-eval_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+train_dataloader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
+eval_dataloader = DataLoader(eval_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
 #endregion
 
 #region SELECT MODEL AND OPTIMIZER
@@ -115,10 +118,11 @@ elif OPTIMIZER == 'adam':
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 else:
     raise NotImplementedError(f'{OPTIMIZER} optimizer is not supported.')
-scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.1)
+scheduler = optim.lr_scheduler.MultiStepLR(optimizer, milestones=[100, 300, 600], gamma=0.1)
 #endregion
     
 #region TRAIN-EVAL LOOP
+max_accuracy = 0
 for epoch in tqdm(range(1, EPOCHS + 1), desc='EPOCH', position=1, leave=False):
     _print('EPOCH %03d' % epoch)
 
@@ -129,10 +133,12 @@ for epoch in tqdm(range(1, EPOCHS + 1), desc='EPOCH', position=1, leave=False):
         onehot = F.one_hot(label, num_classes=NUM_CLASSES).float().to(DEVICE)
         output = model(img)
 
+        optimizer.zero_grad()
         batch_loss = F.cross_entropy(output, onehot)
         batch_loss.backward()
-        optimizer.zero_grad()
         optimizer.step()
+
+        scheduler.step()
 
         loss += batch_loss.item()
 
@@ -174,6 +180,11 @@ for epoch in tqdm(range(1, EPOCHS + 1), desc='EPOCH', position=1, leave=False):
         _print('eval_mean_class_acc=%.4f' % mean_class_accuracy)
         _print('eval_accuracy=%.4f' % accuracy)
         _print()
+
+        if accuracy > max_accuracy:
+            max_accuracy = accuracy
+            torch.save(model.state_dict(), osp.join(MODEL_LOGDIR, 'BEST_%03d.pkl' % epoch))
+            print('BEST')
 
         logfile.flush()
         writer.flush()
