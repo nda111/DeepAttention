@@ -1,6 +1,9 @@
 import os, sys
+
 if __name__ == '__main__':
     sys.path.append(os.path.abspath(f'{__file__}/../../../'))
+
+from typing import Optional, Callable
 
 import torch
 from torch import nn
@@ -8,137 +11,132 @@ from torch import nn
 from models.modules import SEBlock
 
 
-def conv3x3(in_channels: int, out_channels: int, stride: int=1, groups: int=1):
+def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
+    """3x3 convolution with padding"""
     return nn.Conv2d(
-        in_channels, out_channels,
-         kernel_size=(3, 3),  
-         padding=(1, 1),
-         stride=stride, groups=groups, bias=False)
+        in_planes,
+        out_planes,
+        kernel_size=3,
+        stride=stride,
+        padding=dilation,
+        groups=groups,
+        bias=False,
+        dilation=dilation,
+    )
 
 
-def conv1x1(in_channels: int, out_channels: int, stride: int=1):
-    return nn.Conv2d(
-        in_channels, out_channels, 
-        kernel_size=(1, 1), stride=stride, bias=False)
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    """1x1 convolution"""
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
 
 
-class BasicBlock(nn.Module):
+class SEBasicBlock(nn.Module):
+    expansion: int = 1
+
     def __init__(
-        self, 
-        in_channels: int, out_channels: int, downsample: bool=False, 
-        use_se: bool=False, groups: int=1):
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64:
+            raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1:
+            raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
 
-        super(BasicBlock, self).__init__()
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        # Both self.conv1 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
         self.downsample = downsample
-        self.use_se = use_se
+        self.se_module = SEBlock(planes)
+        self.stride = stride
 
-        stride = 2 if downsample else 1
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
 
-        self.conv1 = conv3x3(in_channels, out_channels)
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
 
-        self.conv2 = conv3x3(out_channels, out_channels, stride=stride, groups=groups)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        out = self.conv2(out)
+        out = self.bn2(out)
 
-        self.conv3 = conv3x3(in_channels, out_channels, stride=stride)
-        self.bn3 = nn.BatchNorm2d(out_channels)
+        if self.downsample is not None:
+            identity = self.downsample(x)
 
-        if self.use_se:
-            self.se_block = SEBlock(out_channels)
+        out += identity
+        out = self.se_module(out)
+        out = self.relu(out)
 
-    def forward(self, x):
-        y = self.conv1(x)
-        y = self.bn1(y)
-        y = torch.relu(y)
+        return out
 
-        y = self.conv2(y)
-        y = self.bn2(y)
-        y = torch.relu(y)
-        if self.use_se:
-            y = self.se_block(y)
 
-        x = self.conv3(x)
-        x = self.bn3(x)
-        return y + x
-    
+class SEBottleneck(nn.Module):
+    # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
+    # while original implementation places the stride at the first 1x1 convolution(self.conv1)
+    # according to "Deep residual learning for image recognition"https://arxiv.org/abs/1512.03385.
+    # This variant is also known as ResNet V1.5 and improves accuracy according to
+    # https://ngc.nvidia.com/catalog/model-scripts/nvidia:resnet_50_v1_5_for_pytorch.
 
-class Bottleneck(nn.Module):
+    expansion: int = 4
+
     def __init__(
-        self, 
-        in_channels: int, out_channels: int, downsample: bool=False, 
-        use_se: bool=False, groups: int=1):
-
-        super(Bottleneck, self).__init__()
-
-        self.in_channels = in_channels
-        self.out_channels = out_channels
+        self,
+        inplanes: int,
+        planes: int,
+        stride: int = 1,
+        downsample: Optional[nn.Module] = None,
+        groups: int = 1,
+        base_width: int = 64,
+        dilation: int = 1,
+        norm_layer: Optional[Callable[..., nn.Module]] = None,
+    ) -> None:
+        super().__init__()
+        if norm_layer is None:
+            norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.0)) * groups
+        # Both self.conv2 and self.downsample layers downsample the input when stride != 1
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
-        self.use_se = use_se
+        self.se_module = SEBlock(planes * SEBottleneck.expansion)
+        self.stride = stride
 
-        stride = 2 if downsample else 1
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
 
-        self.conv1 = conv1x1(in_channels, out_channels)
-        self.bn1 = nn.BatchNorm2d(out_channels)
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
 
-        self.conv2 = conv3x3(out_channels, out_channels, stride=stride, groups=groups)
-        self.bn2 = nn.BatchNorm2d(out_channels)
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
 
-        self.conv3 = conv1x1(out_channels, out_channels)
-        self.bn3 = nn.BatchNorm2d(out_channels)
+        out = self.conv3(out)
+        out = self.bn3(out)
 
-        self.conv4 = conv3x3(in_channels, out_channels, stride=stride)
-        self.bn4 = nn.BatchNorm2d(out_channels)
+        if self.downsample is not None:
+            identity = self.downsample(x)
 
-        if self.use_se:
-            self.se_block = SEBlock(out_channels)
+        out += identity
+        out = self.se_module(out)
+        out = self.relu(out)
 
-    def forward(self, x):
-        y = self.conv1(x)
-        y = self.bn1(y)
-        y = torch.relu(y)
-
-        y = self.conv2(y)
-        y = self.bn2(y)
-        y = torch.relu(y)
-
-        y = self.conv3(y)
-        y = self.bn3(y)
-        y = torch.relu(y)
-        if self.use_se:
-            y = self.se_block(y)
-
-        x = self.conv4(x)
-        x = self.bn4(x)
-
-        return y + x
-    
-
-def test():
-    sample = torch.randn(4, 3, 112, 112)
-
-    def case(block, use_se, is_resnext):
-        net = nn.Sequential(
-            block(3, 64, downsample=True, use_se=use_se, is_resnext=False),
-            block(64, 64, downsample=False, use_se=use_se, is_resnext=is_resnext),
-            block(64, 64, downsample=False, use_se=use_se, is_resnext=is_resnext),
-        )
-        out = net(sample)
-        assert out.shape == (4, 64, 56, 56)
-
-    case(BasicBlock, use_se=False, is_resnext=False)
-    case(BasicBlock, use_se=False, is_resnext=True)
-    case(BasicBlock, use_se=True, is_resnext=False)
-    case(BasicBlock, use_se=True, is_resnext=True)
-    case(Bottleneck, use_se=False, is_resnext=False)
-    case(Bottleneck, use_se=False, is_resnext=True)
-    case(Bottleneck, use_se=True, is_resnext=False)
-    case(Bottleneck, use_se=True, is_resnext=True)
-
-    print('PASSED: /models/modules/resnet.py')
-
-
-if __name__ == '__main__':
-    test()
+        return out
